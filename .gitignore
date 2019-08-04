@@ -13,3 +13,9 @@
 
 # Deployment bundles
 *.zip
+
+# Vendor folder
+vendor/*
+
+# Golang config
+.idea/*

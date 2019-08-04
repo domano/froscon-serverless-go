@@ -17,9 +17,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"github.com/gorilla/mux"
+	"gocloud.dev/blob"
+	_ "gocloud.dev/blob/gcsblob"
+	_ "gocloud.dev/blob/s3blob"
 	"gocloud.dev/server"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -34,6 +39,21 @@ func main() {
 		port = "8080"
 	}
 	srv := server.New(r, nil)
+	bucket, err := blob.OpenBucket(context.Background(), "s3://froscon-serverless")
+	if err != nil {
+		log.Fatal(err)
+	}
+	list := bucket.List(nil)
+	for {
+		item, err := list.Next(context.Background())
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Println(item.Key)
+	}
 	log.Printf("Listening on port %s", port)
 	log.Fatal(srv.ListenAndServe(fmt.Sprintf(":%s", port)))
 }
