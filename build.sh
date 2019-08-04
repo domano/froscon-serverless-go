@@ -5,4 +5,4 @@ set -xe
 go get ./...
 
 # build command
-go build -o bin/application main.go
+go build -o bin/application .
