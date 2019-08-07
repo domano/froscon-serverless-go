@@ -8,6 +8,8 @@ import (
 	_ "gocloud.dev/blob/gcsblob"
 	_ "gocloud.dev/blob/memblob"
 	_ "gocloud.dev/blob/s3blob"
+	"gocloud.dev/gcerrors"
+	"gocloud.dev/requestlog"
 	"gocloud.dev/server"
 	"html/template"
 	"io"
@@ -18,31 +20,49 @@ import (
 
 var tpl *template.Template
 
+const maxSize = 10E7
+
 func main() {
-	bucketPath := os.Getenv("BUCKET_URI")
-	if bucketPath == "" {
-		log.Fatalln("No Bucket URI set.")
-	}
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
+	bucketPath, port := readEnv()
 	tpl, _ = template.New("index").Parse(html)
 
+	// Open Gocloud bucket
 	bucket, err := blob.OpenBucket(context.Background(), bucketPath)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	// Router for client requests
 	r := mux.NewRouter()
 	r.Methods(http.MethodGet).Path("/").HandlerFunc(listHandler(bucket))
 	r.Methods(http.MethodGet).Path("/{image}").HandlerFunc(getFileHandler(bucket))
 	r.Methods(http.MethodPost).Path("/").HandlerFunc(postFileHandler(bucket))
-	srv := server.New(r, nil)
 
-	log.Printf("Listening on port %s", port)
+	// Gocloud server with Logger
+	srv := server.New(r,
+		&server.Options{
+			RequestLogger: requestlog.NewNCSALogger(os.Stdout, nil),
+		},
+	)
+
+	// Die and log if the server throws an error
 	log.Fatal(srv.ListenAndServe(fmt.Sprintf(":%s", port)))
 }
 
+// Read Bucket Path and Port
+func readEnv() (bucketPath string, port string) {
+	bucketPath = os.Getenv("BUCKET_URI")
+	if bucketPath == "" {
+		log.Fatalln("No Bucket URI set.")
+	}
+	port = os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	return bucketPath, port
+}
+
+// HTTP Handler used for listing the images using the provided HTML-Template
 func listHandler(bucket *blob.Bucket) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		list := bucket.List(nil)
@@ -66,35 +86,40 @@ func listHandler(bucket *blob.Bucket) http.HandlerFunc {
 	}
 }
 
+// HTTP-Handler used to return single File from the blob storage
 func getFileHandler(bucket *blob.Bucket) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		log.Println(r.URL.Path)
-		br := readFile(bucket, r.URL.Path[1:])
+		br, err := bucket.NewReader(context.Background(), r.URL.Path[1:], nil)
+		if err != nil {
+			if gcerrors.Code(err) == gcerrors.NotFound {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			} else {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+		}
 		defer br.Close()
-		_, err := io.Copy(w, br)
+		_, err = io.Copy(w, br)
 		if err != nil {
 			log.Println(err)
 		}
 	}
 }
 
+// HTTP-Handler used to accept image uploads and persist them in the blob storage
 func postFileHandler(bucket *blob.Bucket) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		fmt.Println("File Upload Endpoint Hit")
 
-		// Parse our multipart form, 10 << 20 specifies a maximum
-		// upload of 10 MB files.
-		r.ParseMultipartForm(10 << 20)
-		// FormFile returns the first file for the given key `myFile`
-		// it also returns the FileHeader so we can get the Filename,
-		// the Header and the size of the file
+		r.ParseMultipartForm(maxSize)
+		// Get the form file with the key myFile and header information
 		file, header, err := r.FormFile("myFile")
 		if err != nil {
 			log.Println(err)
 			return
 		}
 		defer file.Close()
-		if header.Size > 10E7 {
+		if header.Size > maxSize {
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte("File too big"))
 		}
@@ -107,14 +132,6 @@ func postFileHandler(bucket *blob.Bucket) http.HandlerFunc {
 
 		listHandler(bucket)(w, r)
 	}
-}
-
-func readFile(bucket *blob.Bucket, name string) io.ReadCloser{
-	br, err := bucket.NewReader(context.Background(), name, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
-	return br
 }
 
 func writeFile(bucket *blob.Bucket, name string, file io.Reader) error {
